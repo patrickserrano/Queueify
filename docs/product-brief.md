@@ -46,7 +46,7 @@ Spotify's Web API provides everything we need:
 | Poll current track | `GET /me/player/currently-playing` | Returns track, progress, device, timestamp |
 | Recently played | `GET /me/player/recently-played` | Up to 50 tracks with `played_at` timestamps |
 | Read queue | `GET /me/player/queue` | Returns upcoming queue (useful for "capture forward" feature) |
-| Create playlist | `POST /users/{user_id}/playlists` | Writes directly to user's library |
+| Create playlist | `POST /me/playlists` | Writes directly to user's library (old `/users/{user_id}/playlists` removed Feb 2026) |
 | Add tracks | `POST /playlists/{id}/tracks` | Up to 100 tracks per request |
 
 **Required OAuth scopes:** `user-read-currently-playing`, `user-read-recently-played`, `user-read-playback-state`, `playlist-modify-public`, `playlist-modify-private`
@@ -54,7 +54,7 @@ Spotify's Web API provides everything we need:
 **Key constraints:**
 - Recently-played endpoint returns max 50 tracks — this is why we need active polling rather than relying solely on history
 - Rate limits are per-app, not per-endpoint; Spotify uses a sliding window (anecdotally ~180 requests/minute per user for well-behaved apps)
-- As of February 2026, Spotify requires Premium accounts for apps in "Development Mode" and limits to 50 test users; full production ("Extended Quota Mode") requires Spotify review
+- As of February 2026, Spotify requires Premium accounts for apps in "Development Mode" and limits to 5 test users; full production ("Extended Quota Mode") requires Spotify review and is only available to organizations
 - Polling `currently-playing` every 5-10 seconds is the recommended capture strategy
 
 ### Apple Music (Phase 2 — iOS only)
