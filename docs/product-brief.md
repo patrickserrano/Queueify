@@ -14,7 +14,7 @@ Spotify's "Recently Played" view is limited, unsaveable, and loses context quick
 
 ## 2. Solution
 
-**Queueify** is a companion app (web + iOS) that listens to your active streaming session, records every track that plays, and lets you save any slice of that listening history as a playlist — back to your streaming service, shareable with friends, or exported as a list.
+**Queueify** is a native iOS app that listens to your active streaming session, records every track that plays, and lets you save any slice of that listening history as a playlist — back to your streaming service, shareable with friends, or exported as a list.
 
 ### Core user flow
 
@@ -57,19 +57,18 @@ Spotify's Web API provides everything we need:
 - As of February 2026, Spotify requires Premium accounts for apps in "Development Mode" and limits to 5 test users; full production ("Extended Quota Mode") requires Spotify review and is only available to organizations
 - Polling `currently-playing` every 5-10 seconds is the recommended capture strategy
 
-### Apple Music (Phase 2 — iOS only)
+### Apple Music (MVP — alongside Spotify)
 
 | Capability | Method | Notes |
 |---|---|---|
-| Poll current track | `MusicKit ApplicationMusicPlayer.shared.queue` | Native iOS framework only |
+| Poll current track | `MusicKit ApplicationMusicPlayer.shared.queue` | Native iOS framework; observe `currentEntry` changes via Combine |
 | Recently played | `GET /v1/me/recent/played/tracks` | REST API, but limited to ~30 items, no per-play timestamps |
-| Create playlist | `MusicKit` or `POST /v1/me/library/playlists` | Works on both native and REST |
+| Create playlist | `MusicKit` or `POST /v1/me/library/playlists` | Works via native framework or REST |
 
 **Key constraints:**
-- Queue reading and reliable now-playing data require a **native iOS app** using MusicKit — the REST API alone is insufficient for real-time capture
-- Apple Music on web has no equivalent to `ApplicationMusicPlayer`
+- Queue reading and reliable now-playing data require a **native iOS app** using MusicKit — this is a key reason for going iOS-first
 - Apple's developer token (JWT) does not auto-refresh; requires server-side token management
-- Practical implication: Apple Music support is iOS-native only (no web capture)
+- MusicKit provides `ApplicationMusicPlayer` observation which is more reliable than polling — we get notified on track changes rather than having to poll
 
 ### Other Platforms (Future / Not Viable)
 
@@ -79,25 +78,42 @@ Spotify's Web API provides everything we need:
 | Amazon Music | Closed beta | API exists but is invite-only with no public timeline |
 | Tidal | No key endpoints | Official API lacks currently-playing and recently-played endpoints entirely |
 
-**Recommendation:** Launch with Spotify on web + iOS. Add Apple Music on iOS in Phase 2. Monitor YouTube Music and Tidal for API improvements.
+**Recommendation:** Launch as a native iOS app with Spotify + Apple Music from day one. Going iOS-first is the right call because Apple Music capture *requires* native MusicKit, and Spotify's REST API works perfectly from an iOS app. Add Android in a future phase. Monitor YouTube Music and Tidal for API improvements.
 
 ## 5. Capture Architecture
 
 ### Strategy: Hybrid polling + history backfill
 
 ```
-┌──────────────┐     poll every 5-10s      ┌──────────────────┐
-│  Queueify    │ ◄─────────────────────────►│  Spotify API     │
-│  Client/     │    /me/player/currently-   │                  │
-│  Worker      │     playing                │                  │
-└──────┬───────┘                            └──────────────────┘
-       │
-       │  track changed? dedupe + append
-       ▼
-┌──────────────┐
-│  Capture     │  session_id, track_id, played_at,
-│  Session DB  │  artist, album, duration, source
-└──────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    Queueify iOS App                      │
+│                                                         │
+│  ┌─────────────────┐       ┌──────────────────────┐    │
+│  │ Spotify Capture  │       │ Apple Music Capture   │    │
+│  │ (REST polling    │       │ (MusicKit observer    │    │
+│  │  every 5-10s)    │       │  via Combine)         │    │
+│  └────────┬────────┘       └──────────┬───────────┘    │
+│           │                           │                 │
+│           └─────────┬─────────────────┘                 │
+│                     ▼                                   │
+│           ┌─────────────────┐                           │
+│           │ Capture Engine  │  dedupe, backfill,        │
+│           │ (on-device)     │  session management       │
+│           └────────┬────────┘                           │
+│                    │                                    │
+│                    ▼                                    │
+│           ┌─────────────────┐                           │
+│           │ Local Store     │  Core Data / SwiftData    │
+│           │ (sessions +     │                           │
+│           │  tracks)        │                           │
+│           └────────┬────────┘                           │
+└────────────────────┼────────────────────────────────────┘
+                     │ sync (Pro)
+                     ▼
+              ┌──────────────┐
+              │  API Server  │  server-side polling,
+              │  + Postgres  │  session backup, sharing
+              └──────────────┘
 ```
 
 **Why polling, not webhooks?** Spotify does not offer real-time playback webhooks. Polling `currently-playing` is the standard pattern used by scrobbling apps (Last.fm, stats.fm, etc.).
@@ -108,37 +124,40 @@ Spotify's Web API provides everything we need:
 - Backfill from `recently-played` on app open to catch anything missed while backgrounded
 
 **Where polling runs:**
-- **Web:** Client-side polling via the browser while the tab is open; optional server-side polling for "always-on" capture (premium feature)
-- **iOS:** Background App Refresh + foreground polling; MusicKit observer for Apple Music
+- **iOS (Spotify):** Foreground polling of Spotify REST API + Background App Refresh for catching up; backfill from `recently-played` when app returns to foreground
+- **iOS (Apple Music):** MusicKit `ApplicationMusicPlayer` observation via Combine (event-driven, not polling); Background App Refresh as fallback
+- **Server-side (Pro):** Optional server-side polling of Spotify API for always-on capture even when the app is fully suspended
 
 ## 6. Feature Roadmap
 
-### Phase 1 — MVP (Spotify Web)
-
-- Spotify OAuth login
-- Real-time capture via client-side polling
-- Session timeline view (track list with timestamps, album art)
-- "Save as Playlist" to Spotify
-- Basic session management (start, stop, rename, delete)
-- Responsive web app (mobile-friendly)
-
-### Phase 2 — iOS + Polish
+### Phase 1 — MVP (iOS: Spotify + Apple Music)
 
 - Native iOS app (SwiftUI)
-- Apple Music support via MusicKit
-- Background capture (iOS background refresh)
+- Spotify OAuth login + Apple Music authorization via MusicKit
+- Real-time capture: Spotify REST polling + MusicKit `ApplicationMusicPlayer` observation
+- Session timeline view (track list with timestamps, album art)
+- "Save as Playlist" to the user's connected streaming service
+- Basic session management (start, stop, rename, delete)
+- Background App Refresh to catch up on missed tracks
+- Backfill from Spotify `recently-played` / Apple Music `recent/played/tracks` on app open
+
+### Phase 2 — Polish + Social
+
 - Push notifications ("Your session captured 47 tracks — save it?")
-- Session sharing (link to view a session's tracklist)
-- Collaborative sessions (multiple people contribute to one capture)
-
-### Phase 3 — Social + Intelligence
-
-- Public session feed ("What people are listening to at SXSW")
-- AI-powered session naming ("Friday Night House Party")
-- Session stats (genres, decades, energy arc, BPM graph)
+- Session sharing (deep link to view a session's tracklist)
+- Collaborative sessions (multiple people contribute to one capture — party mode)
 - "Remix Session" — reorder, remove, and refine before saving
-- Cross-platform playlist export (convert between Spotify/Apple Music/etc.)
+- Session stats (genres, decades, energy arc, BPM graph)
+- AI-powered session naming ("Friday Night House Party")
+- Cross-platform playlist export (Spotify session → Apple Music playlist and vice versa)
+
+### Phase 3 — Android + Expansion
+
+- Android app (Kotlin/Compose) with Spotify support
+- Public session feed ("What people are listening to at SXSW")
 - Integration with Last.fm scrobble history
+- Queueify for DJs / Venues (professional tiers)
+- Monitor YouTube Music, Amazon Music, and Tidal APIs for viability
 
 ## 7. Monetization
 
@@ -151,7 +170,7 @@ Spotify's Web API provides everything we need:
 
 ### Free Tier
 
-- Unlimited manual capture sessions (must have app/tab open)
+- Unlimited manual capture sessions (app must be running or recently backgrounded)
 - Save playlists to your streaming service
 - 30-day session history
 - Up to 3 active sessions at a time
@@ -172,6 +191,7 @@ Spotify's Web API provides everything we need:
 - **Annual discount (37% off)** incentivizes commitment and reduces churn
 - **Server-side polling is the natural upsell** — it has real infrastructure cost and delivers real incremental value
 - **No feature feels punitive to remove** — free users get the full core experience
+- **Apple Music users are the ideal early audience** — they already pay for a premium music service, skew toward higher willingness to spend on apps, and are accustomed to paying for quality iOS experiences. Launching iOS-first puts us directly in front of the highest-converting user segment.
 
 ### Revenue projections (illustrative)
 
@@ -192,14 +212,14 @@ Spotify's Web API provides everything we need:
 
 | Layer | Technology | Rationale |
 |---|---|---|
-| **Web frontend** | Next.js (React) + Tailwind CSS | SSR for SEO, great DX, fast iteration |
-| **iOS app** | SwiftUI + MusicKit | Native feel, background refresh, MusicKit integration |
-| **API server** | Node.js (Fastify) or Python (FastAPI) | Lightweight, async-friendly for polling workers |
+| **iOS app** | SwiftUI + MusicKit | Native feel, background refresh, MusicKit observation for Apple Music, Spotify REST API for Spotify |
+| **API server** | Node.js (Fastify) or Python (FastAPI) | Lightweight, async-friendly for server-side polling workers |
 | **Database** | PostgreSQL + Redis | Postgres for sessions/users/tracks; Redis for rate-limit tracking and polling state |
 | **Background jobs** | BullMQ (Node) or Celery (Python) | Server-side polling workers for Pro users |
-| **Auth** | OAuth 2.0 (Spotify, Apple) + session tokens | Standard flow; no password management needed |
-| **Hosting** | Vercel (web) + Railway or Fly.io (API) + Supabase (DB) | Low-ops, generous free tiers for MVP |
-| **Payments** | Stripe | Industry standard, handles subscriptions, Apple Pay support |
+| **Auth** | OAuth 2.0 (Spotify) + MusicKit authorization (Apple) | Standard flows; no password management needed |
+| **Hosting** | Railway or Fly.io (API) + Supabase (DB) | Low-ops, generous free tiers for MVP |
+| **Payments** | RevenueCat + StoreKit 2 | Handles iOS subscriptions, App Store billing, and analytics; Stripe for any future web/Android |
+| **Future: Android** | Kotlin + Jetpack Compose | Spotify support; Apple Music not available on Android |
 
 ## 9. Risks & Mitigations
 
@@ -237,11 +257,11 @@ Spotify's Web API provides everything we need:
 
 1. Refine this brief based on team feedback
 2. Write ADRs for key technical decisions:
-   - ADR-001: Polling strategy and interval tuning
-   - ADR-002: Client-side vs. server-side capture architecture
+   - ADR-001: Polling strategy (Spotify REST) vs. observation (Apple Music MusicKit)
+   - ADR-002: On-device vs. server-side capture architecture
    - ADR-003: Data model for sessions and tracks
-   - ADR-004: Authentication and multi-provider OAuth
-   - ADR-005: Monetization and subscription infrastructure
+   - ADR-004: Authentication — Spotify OAuth + MusicKit authorization
+   - ADR-005: Subscription infrastructure (RevenueCat + StoreKit 2)
 3. Write PCDs (Product Concept Documents) for each phase
 4. Build landing page to validate demand before writing code
 5. Register for Spotify Extended Quota Mode
