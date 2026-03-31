@@ -104,15 +104,22 @@ Spotify's Web API provides everything we need:
 │                    ▼                                    │
 │           ┌─────────────────┐                           │
 │           │ Local Store     │  SwiftData                │
-│           │ (sessions +     │                           │
+│           │ (sessions +     │  (works fully offline)    │
 │           │  tracks)        │                           │
 │           └────────┬────────┘                           │
+│                    │                                    │
+│                    ▼                                    │
+│           ┌─────────────────┐                           │
+│           │ Sync Engine     │  batched push on capture, │
+│           │ (Pro only)      │  pull on push notification│
+│           └────────┬────────┘                           │
 └────────────────────┼────────────────────────────────────┘
-                     │ sync (Pro)
+                     │ REST API (bidirectional)
                      ▼
               ┌──────────────┐
               │  API Server  │  server-side polling,
-              │  + Postgres  │  session backup, sharing
+              │  + Postgres  │  session backup, sharing,
+              │              │  collaborative sessions
               └──────────────┘
 ```
 
@@ -128,6 +135,33 @@ Spotify's Web API provides everything we need:
 - **iOS (Apple Music):** A `MusicKitCaptureService` actor observes `ApplicationMusicPlayer.shared.queue.currentEntry` changes via `AsyncSequence` (event-driven, not polling). Background App Refresh as fallback.
 - **Capture engine:** A `CaptureEngine` actor coordinates both services, handles deduplication, and writes to SwiftData via a `ModelActor` for background-safe persistence.
 - **Server-side (Pro):** Optional server-side polling of Spotify API for always-on capture even when the app is fully suspended.
+
+### Data storage & sync
+
+**Local-first architecture.** All capture data is written to SwiftData on-device immediately. The app works fully offline — sessions are captured, browsed, and saved to playlists without any server dependency.
+
+**Sync strategy (by tier):**
+
+| Tier | Storage | Sync | Backup |
+|---|---|---|---|
+| **Free** | SwiftData on-device only | None | User is responsible (iCloud device backup covers it incidentally) |
+| **Pro** | SwiftData on-device + API server (Postgres) | Bidirectional — device pushes captured sessions to server; server-side captures (always-on polling) push down to device | Server is the durable backup; sessions survive device loss |
+
+**Why our own API server, not CloudKit:**
+- **Android is on the roadmap.** CloudKit is Apple-only — syncing to our own API means the same backend serves iOS now and Android later without migration.
+- **Server-side polling already requires a server.** Pro's always-on capture generates data server-side that needs to flow *down* to the device. CloudKit can't receive writes from our server.
+- **Session sharing and collaborative capture require a server.** Shared sessions between users can't be modeled cleanly in a per-user CloudKit container.
+- **We control the schema and migration path.** No dependence on CloudKit's opaque sync conflict resolution.
+
+**Sync mechanics:**
+- Device pushes new/updated sessions to the API server after capture events (debounced, batched)
+- Server pushes down server-side captures and shared session updates
+- Conflict resolution: **last-write-wins per track entry** — track captures are append-only and immutable once written, so true conflicts are rare. Session metadata (name, tags) uses timestamp-based LWW.
+- Sync transport: Standard REST API calls from the app; no WebSockets needed for MVP. Push notifications trigger a sync pull for server-side capture events.
+
+**Data retention:**
+- Free: 30-day session history on-device (configurable in settings; SwiftData handles cleanup)
+- Pro: Unlimited history, server-side retention indefinite
 
 ## 6. Feature Roadmap
 
@@ -283,7 +317,8 @@ Spotify's Web API provides everything we need:
    - ADR-003: SwiftData model design for sessions, tracks, and provider accounts
    - ADR-004: Authentication — Spotify OAuth 2.0 PKCE + MusicKit authorization
    - ADR-005: Concurrency architecture — actors, structured concurrency, and background task handling
-   - ADR-006: Subscription infrastructure — RevenueCat + StoreKit 2
+   - ADR-006: Data sync — local-first SwiftData + own API server over CloudKit
+   - ADR-007: Subscription infrastructure — RevenueCat + StoreKit 2
 3. Write PCDs (Product Concept Documents) for each phase
 4. Build landing page to validate demand before writing code
 5. Register for Spotify Extended Quota Mode
