@@ -61,14 +61,14 @@ Spotify's Web API provides everything we need:
 
 | Capability | Method | Notes |
 |---|---|---|
-| Poll current track | `MusicKit ApplicationMusicPlayer.shared.queue` | Native iOS framework; observe `currentEntry` changes via Combine |
+| Poll current track | `MusicKit ApplicationMusicPlayer.shared.queue` | Native iOS framework; observe `currentEntry` changes via `AsyncSequence` (Swift Concurrency) |
 | Recently played | `GET /v1/me/recent/played/tracks` | REST API, but limited to ~30 items, no per-play timestamps |
 | Create playlist | `MusicKit` or `POST /v1/me/library/playlists` | Works via native framework or REST |
 
 **Key constraints:**
 - Queue reading and reliable now-playing data require a **native iOS app** using MusicKit — this is a key reason for going iOS-first
 - Apple's developer token (JWT) does not auto-refresh; requires server-side token management
-- MusicKit provides `ApplicationMusicPlayer` observation which is more reliable than polling — we get notified on track changes rather than having to poll
+- MusicKit provides `ApplicationMusicPlayer` observation via Swift Concurrency (`AsyncSequence` / property observation) which is more reliable than polling — we get notified on track changes rather than having to poll
 
 ### Other Platforms (Future / Not Viable)
 
@@ -91,7 +91,7 @@ Spotify's Web API provides everything we need:
 │  ┌─────────────────┐       ┌──────────────────────┐    │
 │  │ Spotify Capture  │       │ Apple Music Capture   │    │
 │  │ (REST polling    │       │ (MusicKit observer    │    │
-│  │  every 5-10s)    │       │  via Combine)         │    │
+│  │  every 5-10s)    │       │  via AsyncSequence)   │    │
 │  └────────┬────────┘       └──────────┬───────────┘    │
 │           │                           │                 │
 │           └─────────┬─────────────────┘                 │
@@ -103,7 +103,7 @@ Spotify's Web API provides everything we need:
 │                    │                                    │
 │                    ▼                                    │
 │           ┌─────────────────┐                           │
-│           │ Local Store     │  Core Data / SwiftData    │
+│           │ Local Store     │  SwiftData                │
 │           │ (sessions +     │                           │
 │           │  tracks)        │                           │
 │           └────────┬────────┘                           │
@@ -123,10 +123,11 @@ Spotify's Web API provides everything we need:
 - Use `progress_ms` + `timestamp` to detect replays vs. continued playback
 - Backfill from `recently-played` on app open to catch anything missed while backgrounded
 
-**Where polling runs:**
-- **iOS (Spotify):** Foreground polling of Spotify REST API + Background App Refresh for catching up; backfill from `recently-played` when app returns to foreground
-- **iOS (Apple Music):** MusicKit `ApplicationMusicPlayer` observation via Combine (event-driven, not polling); Background App Refresh as fallback
-- **Server-side (Pro):** Optional server-side polling of Spotify API for always-on capture even when the app is fully suspended
+**Where capture runs:**
+- **iOS (Spotify):** A `SpotifyCaptureService` actor polls the Spotify REST API using `async`/`await` on a recurring `Task` with `Task.sleep(for:)`. Background App Refresh backfills from `recently-played` when the app returns to foreground.
+- **iOS (Apple Music):** A `MusicKitCaptureService` actor observes `ApplicationMusicPlayer.shared.queue.currentEntry` changes via `AsyncSequence` (event-driven, not polling). Background App Refresh as fallback.
+- **Capture engine:** A `CaptureEngine` actor coordinates both services, handles deduplication, and writes to SwiftData via a `ModelActor` for background-safe persistence.
+- **Server-side (Pro):** Optional server-side polling of Spotify API for always-on capture even when the app is fully suspended.
 
 ## 6. Feature Roadmap
 
@@ -210,9 +211,19 @@ Spotify's Web API provides everything we need:
 
 ## 8. Technical Stack (Proposed)
 
+### Platform requirements
+
+- **Minimum deployment target:** iOS 26
+- **Language:** Swift 6+ with strict concurrency checking enabled
+- **Concurrency model:** Swift Structured Concurrency throughout — `async`/`await`, `TaskGroup`, `AsyncSequence`, actors. No GCD, no completion handlers, no Combine (except where a dependency has no async alternative).
+
+### Stack
+
 | Layer | Technology | Rationale |
 |---|---|---|
-| **iOS app** | SwiftUI + MusicKit | Native feel, background refresh, MusicKit observation for Apple Music, Spotify REST API for Spotify |
+| **iOS app** | SwiftUI + MusicKit + Swift 6 | `@Observable` macro for state, SwiftData for persistence, `AsyncSequence` for MusicKit observation, actors for thread-safe capture engine |
+| **Networking** | Swift `URLSession` async API | Native async/await support; no need for third-party HTTP libraries |
+| **Local persistence** | SwiftData | Modern replacement for Core Data; `@Model` macro, SwiftUI integration, `ModelActor` for background operations |
 | **API server** | Node.js (Fastify) or Python (FastAPI) | Lightweight, async-friendly for server-side polling workers |
 | **Database** | PostgreSQL + Redis | Postgres for sessions/users/tracks; Redis for rate-limit tracking and polling state |
 | **Background jobs** | BullMQ (Node) or Celery (Python) | Server-side polling workers for Pro users |
@@ -220,6 +231,16 @@ Spotify's Web API provides everything we need:
 | **Hosting** | Railway or Fly.io (API) + Supabase (DB) | Low-ops, generous free tiers for MVP |
 | **Payments** | RevenueCat + StoreKit 2 | Handles iOS subscriptions, App Store billing, and analytics; Stripe for any future web/Android |
 | **Future: Android** | Kotlin + Jetpack Compose | Spotify support; Apple Music not available on Android |
+
+### Anti-patterns to avoid
+
+- **No Combine** — Use `AsyncSequence`, `AsyncStream`, and the `values` property on publishers if bridging is absolutely necessary
+- **No `ObservableObject` / `@Published`** — Use `@Observable` macro (Observation framework)
+- **No Core Data** — Use SwiftData exclusively
+- **No GCD (`DispatchQueue`)** — Use structured concurrency (`Task`, `TaskGroup`, actors)
+- **No completion handlers** — All async work uses `async`/`await`
+- **No singletons** — Use SwiftUI's `@Environment` and dependency injection
+- **No force unwraps in production code** — Guard/optional binding throughout
 
 ## 9. Risks & Mitigations
 
@@ -257,11 +278,12 @@ Spotify's Web API provides everything we need:
 
 1. Refine this brief based on team feedback
 2. Write ADRs for key technical decisions:
-   - ADR-001: Polling strategy (Spotify REST) vs. observation (Apple Music MusicKit)
+   - ADR-001: Capture strategy — Spotify REST polling vs. MusicKit AsyncSequence observation
    - ADR-002: On-device vs. server-side capture architecture
-   - ADR-003: Data model for sessions and tracks
-   - ADR-004: Authentication — Spotify OAuth + MusicKit authorization
-   - ADR-005: Subscription infrastructure (RevenueCat + StoreKit 2)
+   - ADR-003: SwiftData model design for sessions, tracks, and provider accounts
+   - ADR-004: Authentication — Spotify OAuth 2.0 PKCE + MusicKit authorization
+   - ADR-005: Concurrency architecture — actors, structured concurrency, and background task handling
+   - ADR-006: Subscription infrastructure — RevenueCat + StoreKit 2
 3. Write PCDs (Product Concept Documents) for each phase
 4. Build landing page to validate demand before writing code
 5. Register for Spotify Extended Quota Mode
