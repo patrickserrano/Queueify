@@ -121,7 +121,21 @@ actor MusicKitCaptureService: CaptureService {
     func start(session: CaptureSession.ID) async throws {
         observationTask = Task {
             let player = ApplicationMusicPlayer.shared
-            for await entry in player.queue.currentEntry.values {
+
+            // Use Observation framework (not Combine) to detect currentEntry changes
+            let entryChanges = AsyncStream<ApplicationMusicPlayer.Queue.Entry?> { cont in
+                @Sendable func observe() {
+                    withObservationTracking {
+                        _ = player.queue.currentEntry
+                    } onChange: {
+                        cont.yield(player.queue.currentEntry)
+                        observe()
+                    }
+                }
+                observe()
+            }
+
+            for await entry in entryChanges {
                 guard !Task.isCancelled else { break }
                 if let track = CapturedTrack(from: entry) {
                     continuation.yield(track)

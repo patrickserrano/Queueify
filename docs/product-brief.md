@@ -156,7 +156,7 @@ Spotify's Web API provides everything we need:
 **Sync mechanics:**
 - Device pushes new/updated sessions to the API server after capture events (debounced, batched)
 - Server pushes down server-side captures and shared session updates
-- Conflict resolution: **last-write-wins per track entry** — track captures are append-only and immutable once written, so true conflicts are rare. Session metadata (name, tags) uses timestamp-based LWW.
+- Conflict resolution: track captures are **append-only and immutable** — duplicates are resolved via deduplication by `(session_id, provider_track_id, played_at)`, keeping the first arrival. Session metadata (name, tags) uses **optimistic locking** with server-assigned version numbers.
 - Sync transport: Standard REST API calls from the app; no WebSockets needed for MVP. Push notifications trigger a sync pull for server-side capture events.
 
 **Data retention:**

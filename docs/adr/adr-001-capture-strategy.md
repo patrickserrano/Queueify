@@ -272,22 +272,43 @@ actor AppleMusicCaptureService: CaptureService {
         observationTask = Task { [weak self] in
             let player = ApplicationMusicPlayer.shared
 
-            // Observe currentEntry changes via AsyncSequence
-            for await entry in player.queue.objectWillChange.values {
+            // Observe currentEntry changes via withObservationTracking polling loop.
+            // This avoids Combine's objectWillChange — instead we use the Observation
+            // framework to detect when currentEntry changes, yielding an AsyncStream.
+            let entryChanges = AsyncStream<ApplicationMusicPlayer.Queue.Entry?> { continuation in
+                @Sendable func observe() {
+                    withObservationTracking {
+                        _ = player.queue.currentEntry
+                    } onChange: {
+                        continuation.yield(player.queue.currentEntry)
+                        observe()
+                    }
+                }
+                observe()
+                continuation.onTermination = { _ in }
+            }
+
+            for await entry in entryChanges {
                 guard !Task.isCancelled else { break }
                 guard let self else { break }
 
-                guard let currentEntry = player.queue.currentEntry,
-                      case let .song(song) = currentEntry.item else {
+                guard let entry, case let .song(song) = entry.item else {
                     continue
                 }
 
                 let trackID = song.id.rawValue
+                let now = Date()
 
-                // Skip if we just saw this exact track (not a replay scenario)
+                // Allow replays: skip only if same track AND less than track duration elapsed
+                let isDuplicate: Bool
                 if await self.lastSeenTrackID == trackID {
-                    continue
+                    let elapsed = now.timeIntervalSince(await self.lastSeenTime)
+                    let duration = song.duration ?? 180 // default 3 min if unknown
+                    isDuplicate = elapsed < duration * 0.8 // within 80% of track length = still playing
+                } else {
+                    isDuplicate = false
                 }
+                guard !isDuplicate else { continue }
 
                 let track = CapturedTrack(
                     trackID: trackID,
@@ -299,7 +320,7 @@ actor AppleMusicCaptureService: CaptureService {
                     source: .appleMusic
                 )
                 continuation.yield(track)
-                await self.updateLastSeen(trackID: trackID)
+                await self.updateLastSeen(trackID: trackID, at: now)
             }
 
             continuation.finish()

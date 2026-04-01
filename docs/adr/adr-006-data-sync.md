@@ -132,12 +132,12 @@ Content-Type: application/json
       "type": "session",
       "action": "upsert",
       "client_id": "uuid",
+      "base_version": 5,
       "data": {
         "name": "Road Trip Day 2",
         "state": "completed",
         "started_at": "2026-03-31T14:00:00Z",
-        "ended_at": "2026-03-31T18:30:00Z",
-        "updated_at": "2026-03-31T18:30:00Z"
+        "ended_at": "2026-03-31T18:30:00Z"
       }
     },
     {
@@ -166,8 +166,8 @@ Content-Type: application/json
 {
   "accepted": 2,
   "rejected": 0,
-  "server_version": 142,
-  "errors": []
+  "conflicts": [],
+  "server_version": 142
 }
 ```
 
@@ -205,16 +205,18 @@ The device stores `last_synced_version` and requests only changes since that ver
 
 **Track captures (append-only):** No conflicts possible. Tracks are never updated or deleted. If the same track appears from both device and server capture (duplicate), deduplicate by `(session_id, provider_track_id, played_at)` — keep the first arrival, discard the duplicate.
 
-**Session metadata (mutable):** Last-write-wins using `updated_at` timestamp.
+**Session metadata (mutable):** Optimistic locking with server-assigned version numbers. The device must include the `base_version` it is editing against. The server rejects stale writes, avoiding clock-skew issues inherent in client-timestamp-based LWW.
 
 ```
-Server has: { name: "Road Trip", updated_at: "2026-03-31T16:00:00Z" }
-Device pushes: { name: "Epic Road Trip", updated_at: "2026-03-31T17:00:00Z" }
-→ Device wins (later timestamp). Server updates and increments sync_version.
+Device has: { name: "Road Trip", sync_version: 5 }
+Device pushes: { name: "Epic Road Trip", base_version: 5 }
+Server has sync_version: 5 → versions match. Server accepts, increments to sync_version: 6.
 
-Server has: { name: "Road Trip", updated_at: "2026-03-31T18:00:00Z" }
-Device pushes: { name: "Epic Road Trip", updated_at: "2026-03-31T17:00:00Z" }
-→ Server wins (later timestamp). Server rejects the metadata change; device pulls server version on next sync.
+Device has: { name: "Road Trip", sync_version: 5 }
+Another device already pushed an update, server is now at sync_version: 6.
+Device pushes: { name: "Epic Road Trip", base_version: 5 }
+Server has sync_version: 6 → stale base. Server rejects with HTTP 409.
+Device pulls latest (sync_version: 6), applies server state, retries if needed.
 ```
 
 **Session deletion:** Soft-delete only. A `deleted_at` timestamp propagates via sync. Tracks within a deleted session are retained server-side for 30 days before hard deletion.
@@ -255,6 +257,7 @@ CREATE TABLE capture_sessions (
     UNIQUE (user_id, client_id)
 );
 
+-- Supports pull queries: filter by user + version for delta sync
 CREATE INDEX idx_sessions_user_version ON capture_sessions (user_id, sync_version);
 CREATE INDEX idx_sessions_user_state ON capture_sessions (user_id, state) WHERE deleted_at IS NULL;
 
@@ -277,6 +280,12 @@ CREATE TABLE captured_tracks (
 
 CREATE INDEX idx_tracks_session ON captured_tracks (session_id, played_at);
 CREATE INDEX idx_tracks_session_version ON captured_tracks (session_id, sync_version);
+
+-- Supports the pull query: GET /api/v1/sync/pull?since_version=N
+-- The pull endpoint joins through capture_sessions to filter by user_id,
+-- but we also store user_id directly on tracks for efficient global pulls.
+ALTER TABLE captured_tracks ADD COLUMN user_id UUID REFERENCES users(id);
+CREATE INDEX idx_tracks_user_version ON captured_tracks (user_id, sync_version);
 
 CREATE TABLE sync_cursors (
     user_id         UUID NOT NULL REFERENCES users(id),

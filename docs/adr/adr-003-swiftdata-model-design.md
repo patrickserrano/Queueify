@@ -95,8 +95,9 @@ final class ProviderAccount: Sendable {
     var email: String?
     var profileImageURL: URL?
 
-    var accessToken: String
-    var refreshToken: String?
+    /// Keychain reference for token lookup — tokens are NEVER stored in SwiftData.
+    /// The actual access/refresh tokens live in the iOS Keychain, keyed by this identifier.
+    var keychainIdentifier: String
     var tokenExpiresAt: Date
 
     var connectedAt: Date
@@ -112,8 +113,7 @@ final class ProviderAccount: Sendable {
         displayName: String,
         email: String? = nil,
         profileImageURL: URL? = nil,
-        accessToken: String,
-        refreshToken: String? = nil,
+        keychainIdentifier: String,
         tokenExpiresAt: Date,
         connectedAt: Date = .now,
         lastUsedAt: Date = .now
@@ -124,8 +124,7 @@ final class ProviderAccount: Sendable {
         self.displayName = displayName
         self.email = email
         self.profileImageURL = profileImageURL
-        self.accessToken = accessToken
-        self.refreshToken = refreshToken
+        self.keychainIdentifier = keychainIdentifier
         self.tokenExpiresAt = tokenExpiresAt
         self.connectedAt = connectedAt
         self.lastUsedAt = lastUsedAt
@@ -136,7 +135,9 @@ final class ProviderAccount: Sendable {
 
 @Model
 final class CaptureSession: Sendable {
-    #Index<CaptureSession>([\.startTime], [\.state], [\.sourceProvider])
+    #Index<CaptureSession>([\.startTime])
+    #Index<CaptureSession>([\.state])
+    #Index<CaptureSession>([\.sourceProvider])
 
     @Attribute(.unique)
     var id: UUID
@@ -194,7 +195,8 @@ final class CaptureSession: Sendable {
 
 @Model
 final class CapturedTrack: Sendable {
-    #Index<CapturedTrack>([\.playedAt], [\.providerTrackID])
+    #Index<CapturedTrack>([\.playedAt])
+    #Index<CapturedTrack>([\.providerTrackID])
 
     @Attribute(.unique)
     var id: UUID
@@ -385,7 +387,7 @@ actor CaptureModelActor {
         let completedState = SessionState.completed
 
         let predicate = #Predicate<CaptureSession> {
-            $0.state == completedState && $0.endTime != nil && $0.endTime! < cutoff
+            $0.state == completedState && $0.endTime.map { $0 < cutoff } ?? false
         }
 
         let descriptor = FetchDescriptor(predicate: predicate)
@@ -500,8 +502,7 @@ enum SessionQueries {
         let completedState = SessionState.completed
         let predicate = #Predicate<CaptureSession> {
             $0.state == completedState
-                && $0.endTime != nil
-                && $0.endTime! < cutoff
+                && $0.endTime.map { $0 < cutoff } ?? false
         }
         return FetchDescriptor(predicate: predicate)
     }
@@ -631,7 +632,7 @@ Four distinct `@Model` classes with explicit relationships, `ModelActor` for bac
 
 3. **Retention cleanup scheduling.** Call `deleteExpiredSessions()` on app launch and on every `scenePhase` transition to `.background`. Gate the call on `tier == .free`.
 
-4. **Token storage.** `ProviderAccount.accessToken` and `refreshToken` are stored in the SwiftData model for convenience during development. Before production release, migrate sensitive tokens to Keychain and store only a Keychain reference in the model. This is tracked separately and does not affect the model graph design.
+4. **Token storage.** `ProviderAccount` stores only a `keychainIdentifier` — actual OAuth tokens (access token, refresh token) are stored in the iOS Keychain with `kSecAttrAccessibleAfterFirstUnlock`. The `keychainIdentifier` is used as the Keychain account key to look up tokens at runtime. This ensures tokens are never written to the unencrypted SwiftData database file.
 
 5. **Sendable conformance.** All `@Model` classes are marked `final class` and declared `Sendable`. The `@Model` macro in iOS 26 supports `Sendable` conformance when all stored properties are themselves `Sendable`. Enums are `Codable & Sendable` to satisfy this requirement.
 

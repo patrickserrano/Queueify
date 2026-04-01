@@ -49,7 +49,7 @@ The server holds the client secret and exchanges the authorization code on behal
 
 - **Single source of truth** — all auth state is observable from one `@Observable` object in the SwiftUI environment.
 - **No client secret** — PKCE eliminates the need for a Spotify client secret on-device or on-server.
-- **Keychain security** — tokens are stored in the iOS Keychain with `kSecAttrAccessibleAfterFirstUnlock`, protected by the Secure Enclave on supported devices.
+- **Keychain security** — tokens are stored in the iOS Keychain with `kSecAttrAccessibleAfterFirstUnlock`, using iOS Data Protection via the keybag (available after first device unlock after boot). Stronger Secure Enclave–backed policies (e.g., biometry/user presence) can be added with appropriate Keychain access control flags if needed.
 - **Pro server-side polling** — Spotify tokens are synced to the backend only for Pro users, keeping free-tier data entirely on-device.
 - **Testable** — `AuthManager` can be initialized with a `TokenStore` protocol and an `AuthSessionProvider` protocol, allowing full unit testing with mocked Keychain and mocked web auth sessions.
 
